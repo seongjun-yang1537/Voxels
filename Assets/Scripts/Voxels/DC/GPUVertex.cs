@@ -11,6 +11,16 @@ namespace Tuntenfisch.Voxels.DC
         public static int SizeInBytes => s_sizeInBytes;
         public static VertexAttributeDescriptor[] Attributes => s_attributes;
 
+        public static GPUVertex Create(float3 position, half4 normal, MaterialIndex materialIndex)
+        {
+            GPUVertex vertex = default;
+            vertex.m_position = position;
+            vertex.m_normal = normal;
+            vertex.m_materialIndex = materialIndex;
+
+            return vertex;
+        }
+
         private static readonly int s_sizeInBytes = Marshal.SizeOf<GPUVertex>();
         private static readonly VertexAttributeDescriptor[] s_attributes =
         {

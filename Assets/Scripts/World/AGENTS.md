@@ -1,0 +1,1 @@
+[codex] Chunk.OnMeshGenerated now supports flat shading when DualContouringConfig.EnableSmoothShading is false; flat shading allocates temporary NativeArrays for vertices and triangles and disposes them after mesh upload.

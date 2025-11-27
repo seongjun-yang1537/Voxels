@@ -191,29 +191,56 @@ namespace Tuntenfisch.World
         {
             m_request = null;
             m_currentLOD = m_targetLOD;
-            m_vertexCount = vertexCount;
-            m_triangleCount = triangleCount;
+            bool enableSmoothShading = WorldManager.VoxelConfig.DualContouringConfig.EnableSmoothShading;
+            NativeArray<GPUVertex> processedVertices = vertices;
+            NativeArray<int> processedTriangles = triangles;
+            int processedVertexCount = vertexCount;
+            int processedTriangleCount = triangleCount;
+            int processedVertexStartIndex = vertexStartIndex;
+            int processedTriangleStartIndex = triangleStartIndex;
+            NativeArray<GPUVertex> flatShadedVertices = default;
+            NativeArray<int> flatShadedTriangles = default;
 
-            if (vertexCount == 0 || triangleCount == 0)
+            if (!enableSmoothShading && processedVertexCount > 0 && processedTriangleCount > 0)
+            {
+                ApplyFlatShading(vertices, vertexStartIndex, triangles, triangleCount, triangleStartIndex, out flatShadedVertices, out flatShadedTriangles);
+                processedVertices = flatShadedVertices;
+                processedTriangles = flatShadedTriangles;
+                processedVertexCount = flatShadedVertices.Length;
+                processedTriangleCount = flatShadedTriangles.Length;
+                processedVertexStartIndex = 0;
+                processedTriangleStartIndex = 0;
+            }
+
+            m_vertexCount = processedVertexCount;
+            m_triangleCount = processedTriangleCount;
+
+            if (processedVertexCount == 0 || processedTriangleCount == 0)
             {
                 m_meshFilter.sharedMesh = null;
                 m_meshCollider.sharedMesh = null;
 
+                if (flatShadedVertices.IsCreated)
+                {
+                    flatShadedVertices.Dispose();
+                    flatShadedTriangles.Dispose();
+                }
+
                 return;
             }
 
-            m_mesh.SetVertexBufferParams(vertexCount, GPUVertex.Attributes);
-            m_mesh.SetIndexBufferParams(triangleCount, IndexFormat.UInt32);
+            m_mesh.SetVertexBufferParams(processedVertexCount, GPUVertex.Attributes);
+            m_mesh.SetIndexBufferParams(processedTriangleCount, IndexFormat.UInt32);
 #if !UNITY_EDITOR
             MeshUpdateFlags flags = MeshUpdateFlags.DontNotifyMeshUsers | MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontResetBoneBounds | MeshUpdateFlags.DontValidateIndices;
-            m_mesh.SetVertexBufferData(vertices, vertexStartIndex, 0, vertexCount, 0, flags);
-            m_mesh.SetIndexBufferData(triangles, triangleStartIndex, 0, triangleCount, flags);
-            m_mesh.SetSubMesh(0, new SubMeshDescriptor(0, triangleCount), flags);
+            m_mesh.SetVertexBufferData(processedVertices, processedVertexStartIndex, 0, processedVertexCount, 0, flags);
+            m_mesh.SetIndexBufferData(processedTriangles, processedTriangleStartIndex, 0, processedTriangleCount, flags);
+            m_mesh.SetSubMesh(0, new SubMeshDescriptor(0, processedTriangleCount), flags);
             m_mesh.RecalculateBounds(flags);
 #else
-            m_mesh.SetVertexBufferData(vertices, vertexStartIndex, 0, vertexCount);
-            m_mesh.SetIndexBufferData(triangles, triangleStartIndex, 0, triangleCount);
-            m_mesh.SetSubMesh(0, new SubMeshDescriptor(0, triangleCount));
+            m_mesh.SetVertexBufferData(processedVertices, processedVertexStartIndex, 0, processedVertexCount);
+            m_mesh.SetIndexBufferData(processedTriangles, processedTriangleStartIndex, 0, processedTriangleCount);
+            m_mesh.SetSubMesh(0, new SubMeshDescriptor(0, processedTriangleCount));
             m_mesh.RecalculateBounds(MeshUpdateFlags.DontValidateIndices);
 #endif
             m_meshFilter.sharedMesh = null;
@@ -221,6 +248,46 @@ namespace Tuntenfisch.World
 
             m_bakeJobHandle = new BakeJob(m_mesh.GetInstanceID()).Schedule();
             m_flags |= ChunkFlags.IsBakingMesh;
+
+            if (flatShadedVertices.IsCreated)
+            {
+                flatShadedVertices.Dispose();
+                flatShadedTriangles.Dispose();
+            }
+        }
+
+        private void ApplyFlatShading(NativeArray<GPUVertex> vertices, int vertexStartIndex, NativeArray<int> triangles, int triangleCount, int triangleStartIndex, out NativeArray<GPUVertex> flatShadedVertices, out NativeArray<int> flatShadedTriangles)
+        {
+            int triangleGroupCount = triangleCount / 3;
+            flatShadedVertices = new NativeArray<GPUVertex>(triangleCount, Allocator.TempJob);
+            flatShadedTriangles = new NativeArray<int>(triangleCount, Allocator.TempJob);
+
+            for (int triangleIndex = 0; triangleIndex < triangleGroupCount; triangleIndex++)
+            {
+                int sourceIndex = triangleStartIndex + 3 * triangleIndex;
+                int firstVertexIndex = triangles[sourceIndex];
+                int secondVertexIndex = triangles[sourceIndex + 1];
+                int thirdVertexIndex = triangles[sourceIndex + 2];
+
+                GPUVertex firstVertex = vertices[vertexStartIndex + firstVertexIndex];
+                GPUVertex secondVertex = vertices[vertexStartIndex + secondVertexIndex];
+                GPUVertex thirdVertex = vertices[vertexStartIndex + thirdVertexIndex];
+
+                float3 edgeAB = secondVertex.Position - firstVertex.Position;
+                float3 edgeAC = thirdVertex.Position - firstVertex.Position;
+                float3 faceNormal = math.normalizesafe(math.cross(edgeAB, edgeAC));
+
+                half4 packedNormal = new half4(faceNormal, 0.0f);
+                int destinationIndex = 3 * triangleIndex;
+
+                flatShadedVertices[destinationIndex] = GPUVertex.Create(firstVertex.Position, packedNormal, firstVertex.MaterialIndex);
+                flatShadedVertices[destinationIndex + 1] = GPUVertex.Create(secondVertex.Position, packedNormal, secondVertex.MaterialIndex);
+                flatShadedVertices[destinationIndex + 2] = GPUVertex.Create(thirdVertex.Position, packedNormal, thirdVertex.MaterialIndex);
+
+                flatShadedTriangles[destinationIndex] = destinationIndex;
+                flatShadedTriangles[destinationIndex + 1] = destinationIndex + 1;
+                flatShadedTriangles[destinationIndex + 2] = destinationIndex + 2;
+            }
         }
 
         private void InitializeMeshComponents()
