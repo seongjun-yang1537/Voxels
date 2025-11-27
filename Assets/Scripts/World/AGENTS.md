@@ -1,2 +1,1 @@
-[codex] Chunk.OnMeshGenerated now supports flat shading when DualContouringConfig.EnableSmoothShading is false; flat shading allocates temporary NativeArrays for vertices and triangles and disposes them after mesh upload.
-[codex] Flat shading normals are packed with half precision using scalar components to satisfy half4 constructors.
+[codex] 플랫 셰이딩용 법선은 half 타입 캐스팅을 사용해 half4로 패킹해야 컴파일 오류가 나지 않는다.
