@@ -98,6 +98,7 @@ namespace Tuntenfisch.Generics
 
             if (count > m_buffer.count)
             {
+              Debug.Log($"{count} {m_buffer.count}");
                 throw new ArgumentOutOfRangeException(nameof(count), count, $"Parameter {nameof(count)} is larger than the buffer's total number of elements.");
             }
         }
