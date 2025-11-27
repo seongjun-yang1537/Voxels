@@ -277,7 +277,7 @@ namespace Tuntenfisch.World
                 float3 edgeAC = thirdVertex.Position - firstVertex.Position;
                 float3 faceNormal = math.normalizesafe(math.cross(edgeAB, edgeAC));
 
-                half4 packedNormal = new half4(faceNormal, 0.0f);
+                half4 packedNormal = new half4(faceNormal.x, faceNormal.y, faceNormal.z, 0.0f);
                 int destinationIndex = 3 * triangleIndex;
 
                 flatShadedVertices[destinationIndex] = GPUVertex.Create(firstVertex.Position, packedNormal, firstVertex.MaterialIndex);
