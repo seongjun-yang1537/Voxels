@@ -2,6 +2,7 @@
 #pragma kernel ApplyLevelOfDetail
 #pragma kernel GenerateOuterCellVertices
 #pragma kernel GenerateTriangles
+#pragma kernel ApplyFlatShading
 
 #include "Assets/Compute/Voxels/Include/Cell.hlsl"
 #include "Assets/Compute/Voxels/Include/Vertex.hlsl"
@@ -49,6 +50,8 @@ RWStructuredBuffer<CellVertexInfo> cellVertexInfoLookupTable;
 RWStructuredBuffer<Vertex> generatedVertices0;
 RWStructuredBuffer<Vertex> generatedVertices1;
 RWByteAddressBuffer generatedTriangles;
+RWStructuredBuffer<Vertex> flatShadedVertices;
+RWStructuredBuffer<uint> flatShadedTriangles;
 
 // Theoretically we can declare below arrays locally and pass them around functions with the "out" or "inout" modifier but that will
 // result in more temporary registers being used by the compiler for some reason. See the following link for more information:
@@ -384,4 +387,30 @@ void GenerateTriangles(uint3 cellID : SV_DispatchThreadID)
             GenerateTriangle(cellVertexInfo, firstNeighbourCellVertexInfo, secondNeighbourCellVertexInfo);
         }
     }
+}
+
+[numthreads(1, 1, 1)]
+void ApplyFlatShading(uint3 id : SV_DispatchThreadID)
+{
+    uint triangleOffsetInBytes = 8 + 12 * id.x;
+    uint3 triangleIndices = generatedTriangles.Load3(triangleOffsetInBytes);
+
+    Vertex firstVertex = generatedVertices0[triangleIndices.x];
+    Vertex secondVertex = generatedVertices0[triangleIndices.y];
+    Vertex thirdVertex = generatedVertices0[triangleIndices.z];
+
+    float3 edgeAB = secondVertex.GetPosition() - firstVertex.GetPosition();
+    float3 edgeAC = thirdVertex.GetPosition() - firstVertex.GetPosition();
+    float3 faceNormal = cross(edgeAB, edgeAC);
+    float normalLengthSquared = dot(faceNormal, faceNormal);
+    faceNormal = normalLengthSquared > 0.0f ? faceNormal * rsqrt(normalLengthSquared) : 0.0f;
+
+    uint destinationIndex = 3 * id.x;
+    flatShadedVertices[destinationIndex] = Vertex::Create(firstVertex.GetPosition(), faceNormal, firstVertex.GetMaterialIndex());
+    flatShadedVertices[destinationIndex + 1] = Vertex::Create(secondVertex.GetPosition(), faceNormal, secondVertex.GetMaterialIndex());
+    flatShadedVertices[destinationIndex + 2] = Vertex::Create(thirdVertex.GetPosition(), faceNormal, thirdVertex.GetMaterialIndex());
+
+    flatShadedTriangles[destinationIndex] = destinationIndex;
+    flatShadedTriangles[destinationIndex + 1] = destinationIndex + 1;
+    flatShadedTriangles[destinationIndex + 2] = destinationIndex + 2;
 }

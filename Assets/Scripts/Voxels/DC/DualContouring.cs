@@ -122,7 +122,7 @@ namespace Tuntenfisch.Voxels.DC
             // Only call the callback if the task hasn't been canceled.
             if (!task.Canceled)
             {
-                task.Callback(worker.Vertices, worker.VertexCount, 0, worker.Triangles, worker.TriangleCount, 2);
+                task.Callback(worker.Vertices, worker.VertexCount, worker.VertexStartIndex, worker.Triangles, worker.TriangleCount, worker.TriangleStartIndex);
             }
             m_taskPool.Release(task);
 
@@ -144,22 +144,34 @@ namespace Tuntenfisch.Voxels.DC
             // In addition to the triangles, this native array also reads back the number of triangles and the number of vertices generated, i.e.
             // two additional integers.
             public NativeArray<int> Triangles => m_generatedTriangles;
+            public int VertexStartIndex => m_vertexStartIndex;
+            public int TriangleStartIndex => m_triangleStartIndex;
+
+            private const int FlatShadingKernelIndex = 4;
 
             private DualContouring m_parent;
 
             private NativeArray<GPUVertex> m_generatedVertices;
             private NativeArray<int> m_generatedTriangles;
+            private NativeArray<int> m_triangleCounts;
 
             private AsyncComputeBuffer m_cellVertexInfoLookupTableBuffer;
             private AsyncComputeBuffer m_generatedVerticesBuffer0;
             private AsyncComputeBuffer m_generatedVerticesBuffer1;
             private AsyncComputeBuffer m_generatedTrianglesBuffer;
+            private AsyncComputeBuffer m_flatShadedVerticesBuffer;
+            private AsyncComputeBuffer m_flatShadedTrianglesBuffer;
+            private ComputeBuffer m_flatShadingDispatchArgsBuffer;
+            private uint[] m_flatShadingDispatchArgs;
+            private int m_vertexStartIndex;
+            private int m_triangleStartIndex;
 
             public Worker(DualContouring parent)
             {
                 m_parent = parent;
                 m_parent.m_voxelConfig.VoxelVolumeConfig.OnDirtied += CreateBuffers;
                 m_parent.OnDestroyed += Dispose;
+                m_flatShadingDispatchArgs = new uint[3];
                 CreateBuffers();
             }
 
@@ -173,6 +185,13 @@ namespace Tuntenfisch.Voxels.DC
 
             public Status Process()
             {
+                return IsSmoothShadingEnabled ? ProcessSmoothShading() : ProcessFlatShading();
+            }
+
+            private bool IsSmoothShadingEnabled => m_parent.m_voxelConfig.DualContouringConfig.EnableSmoothShading;
+
+            private Status ProcessSmoothShading()
+            {
                 if (m_generatedVerticesBuffer0.IsDataAvailable() && m_generatedTrianglesBuffer.IsDataAvailable())
                 {
                     int requestedVertexCount = m_generatedVerticesBuffer0.EndReadback();
@@ -180,6 +199,8 @@ namespace Tuntenfisch.Voxels.DC
 
                     VertexCount = m_generatedTriangles[0];
                     TriangleCount = 3 * m_generatedTriangles[1];
+                    m_vertexStartIndex = 0;
+                    m_triangleStartIndex = 2;
 
                     if (requestedVertexCount < VertexCount || requestedTriangleCount < TriangleCount || m_generatedVerticesBuffer0.HasError || m_generatedTrianglesBuffer.HasError)
                     {
@@ -187,7 +208,6 @@ namespace Tuntenfisch.Voxels.DC
                         {
                             Debug.LogWarning("GPU readback error detected.");
                         }
-                        // If we retrieved too few vertices/triangles, we need to start another readback to retrieve the correct count.
                         m_generatedVerticesBuffer0.StartReadbackNonAlloc(ref m_generatedVertices, VertexCount);
                         m_generatedTrianglesBuffer.StartReadbackNonAlloc(ref m_generatedTriangles, TriangleCount + 2);
 
@@ -198,6 +218,48 @@ namespace Tuntenfisch.Voxels.DC
                 }
 
                 return Status.WaitingForGPUReadback;
+            }
+
+            private Status ProcessFlatShading()
+            {
+                if (m_flatShadedVerticesBuffer.IsDataAvailable() && m_flatShadedTrianglesBuffer.IsDataAvailable() && m_generatedTrianglesBuffer.IsDataAvailable())
+                {
+                    int requestedVertexCount = m_flatShadedVerticesBuffer.EndReadback();
+                    int requestedTriangleCount = m_flatShadedTrianglesBuffer.EndReadback();
+                    m_generatedTrianglesBuffer.EndReadback();
+
+                    VertexCount = 3 * m_triangleCounts[1];
+                    TriangleCount = 3 * m_triangleCounts[1];
+                    m_vertexStartIndex = 0;
+                    m_triangleStartIndex = 0;
+
+                    if (requestedVertexCount < VertexCount || requestedTriangleCount < TriangleCount || m_flatShadedVerticesBuffer.HasError || m_flatShadedTrianglesBuffer.HasError || m_generatedTrianglesBuffer.HasError)
+                    {
+                        if (Debug.isDebugBuild && (m_flatShadedVerticesBuffer.HasError || m_flatShadedTrianglesBuffer.HasError))
+                        {
+                            Debug.LogWarning("GPU readback error detected.");
+                        }
+                        m_flatShadedVerticesBuffer.StartReadbackNonAlloc(ref m_generatedVertices, VertexCount);
+                        m_flatShadedTrianglesBuffer.StartReadbackNonAlloc(ref m_generatedTriangles, TriangleCount);
+                        m_generatedTrianglesBuffer.StartReadbackNonAlloc(ref m_triangleCounts, 2);
+
+                        return Status.WaitingForGPUReadback;
+                    }
+
+                    return Status.Done;
+                }
+
+                return Status.WaitingForGPUReadback;
+            }
+
+            private void DispatchFlatShading()
+            {
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(FlatShadingKernelIndex, ComputeShaderProperties.GeneratedVertices0, m_generatedVerticesBuffer0);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(FlatShadingKernelIndex, ComputeShaderProperties.GeneratedTriangles, m_generatedTrianglesBuffer);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(FlatShadingKernelIndex, ComputeShaderProperties.FlatShadedVertices, m_flatShadedVerticesBuffer);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(FlatShadingKernelIndex, ComputeShaderProperties.FlatShadedTriangles, m_flatShadedTrianglesBuffer);
+                ComputeBuffer.CopyCount(m_cellVertexInfoLookupTableBuffer, m_flatShadingDispatchArgsBuffer, 0);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.DispatchIndirect(FlatShadingKernelIndex, m_flatShadingDispatchArgsBuffer);
             }
 
             public void GenerateMeshAsync(Task task)
@@ -271,10 +333,20 @@ namespace Tuntenfisch.Voxels.DC
                 // Copy the number of vertices/triangles generated into the start of the triangles buffer.
                 ComputeBuffer.CopyCount(m_generatedVerticesBuffer0, m_generatedTrianglesBuffer, 0);
                 ComputeBuffer.CopyCount(m_cellVertexInfoLookupTableBuffer, m_generatedTrianglesBuffer, sizeof(uint));
-                // Retrieve both the vertices and triangles buffer.
-                m_generatedVerticesBuffer0.StartReadbackNonAlloc(ref m_generatedVertices, estimatedVertexCount);
-                // We're adding 2 because the vertex and triangle counts are stored in the buffer as well.
-                m_generatedTrianglesBuffer.StartReadbackNonAlloc(ref m_generatedTriangles, estimatedTriangleCount + 2);
+
+                if (IsSmoothShadingEnabled)
+                {
+                    m_generatedVerticesBuffer0.StartReadbackNonAlloc(ref m_generatedVertices, estimatedVertexCount);
+                    m_generatedTrianglesBuffer.StartReadbackNonAlloc(ref m_generatedTriangles, estimatedTriangleCount + 2);
+                }
+                else
+                {
+                    DispatchFlatShading();
+                    int estimatedFlatShadedElementCount = estimatedTriangleCount;
+                    m_flatShadedVerticesBuffer.StartReadbackNonAlloc(ref m_generatedVertices, estimatedFlatShadedElementCount);
+                    m_flatShadedTrianglesBuffer.StartReadbackNonAlloc(ref m_generatedTriangles, estimatedFlatShadedElementCount);
+                    m_generatedTrianglesBuffer.StartReadbackNonAlloc(ref m_triangleCounts, 2);
+                }
             }
 
             private (int, int) EstimateVertexAndTriangleCounts(Task task)
@@ -285,7 +357,8 @@ namespace Tuntenfisch.Voxels.DC
                 estimatedVertexCount = math.clamp(1, estimatedVertexCount, m_generatedVertices.Length);
 
                 int estimatedTriangleCount = (int)math.round(factor * task.CurrentTriangleCount);
-                estimatedTriangleCount = math.clamp(1, estimatedTriangleCount, m_generatedTriangles.Length - 2);
+                int maximumTriangleElements = IsSmoothShadingEnabled ? m_generatedTriangles.Length - 2 : m_generatedTriangles.Length;
+                estimatedTriangleCount = math.clamp(1, estimatedTriangleCount, maximumTriangleElements);
 
                 return (estimatedVertexCount, estimatedTriangleCount);
             }
@@ -294,7 +367,9 @@ namespace Tuntenfisch.Voxels.DC
             {
                 // Create CPU buffers.
                 int maxNumberOfVertices = m_parent.m_voxelConfig.VoxelVolumeConfig.CellCount;
-                int generatedVerticesCapacity = maxNumberOfVertices;
+                int maxNumberOfTriangles = 3 * 6 * (int)math.round(math.pow(m_parent.m_voxelConfig.VoxelVolumeConfig.NumberOfCellsAlongAxis - 1, 3));
+                int flatShadedElementCapacity = 3 * maxNumberOfTriangles;
+                int generatedVerticesCapacity = math.max(maxNumberOfVertices, flatShadedElementCapacity);
 
                 if (!m_generatedVertices.IsCreated || m_generatedVertices.Length != generatedVerticesCapacity)
                 {
@@ -305,10 +380,7 @@ namespace Tuntenfisch.Voxels.DC
                     m_generatedVertices = new NativeArray<GPUVertex>(generatedVerticesCapacity, Allocator.Persistent);
                 }
 
-                int maxNumberOfTriangles = 3 * 6 * (int)math.round(math.pow(m_parent.m_voxelConfig.VoxelVolumeConfig.NumberOfCellsAlongAxis - 1, 3));
-                // As mentioned, in addition to storing the triangles, this buffer will also store the number of vertices and triangles generated, i.e.
-                // two additional integers.
-                int generatedTrianglesCapacity = maxNumberOfTriangles + 2;
+                int generatedTrianglesCapacity = math.max(maxNumberOfTriangles + 2, flatShadedElementCapacity);
 
                 if (!m_generatedTriangles.IsCreated || m_generatedTriangles.Length != generatedTrianglesCapacity)
                 {
@@ -317,6 +389,11 @@ namespace Tuntenfisch.Voxels.DC
                         m_generatedTriangles.Dispose();
                     }
                     m_generatedTriangles = new NativeArray<int>(generatedTrianglesCapacity, Allocator.Persistent);
+                }
+
+                if (!m_triangleCounts.IsCreated)
+                {
+                    m_triangleCounts = new NativeArray<int>(2, Allocator.Persistent);
                 }
 
                 // Create GPU buffers.
@@ -347,6 +424,27 @@ namespace Tuntenfisch.Voxels.DC
                     // To copy the counter values into the triangles buffer it needs to be of type "raw".
                     m_generatedTrianglesBuffer = new AsyncComputeBuffer(m_generatedTriangles.Length, sizeof(uint), ComputeBufferType.Raw);
                 }
+
+                if (m_flatShadedVerticesBuffer?.Count != flatShadedElementCapacity)
+                {
+                    m_flatShadedVerticesBuffer?.Release();
+                    m_flatShadedVerticesBuffer = new AsyncComputeBuffer(flatShadedElementCapacity, GPUVertex.SizeInBytes);
+                }
+
+                if (m_flatShadedTrianglesBuffer?.Count != flatShadedElementCapacity)
+                {
+                    m_flatShadedTrianglesBuffer?.Release();
+                    m_flatShadedTrianglesBuffer = new AsyncComputeBuffer(flatShadedElementCapacity, sizeof(uint));
+                }
+
+                if (m_flatShadingDispatchArgsBuffer == null)
+                {
+                    m_flatShadingDispatchArgs[0] = 0;
+                    m_flatShadingDispatchArgs[1] = 1;
+                    m_flatShadingDispatchArgs[2] = 1;
+                    m_flatShadingDispatchArgsBuffer = new ComputeBuffer(3, sizeof(uint), ComputeBufferType.IndirectArguments);
+                    m_flatShadingDispatchArgsBuffer.SetData(m_flatShadingDispatchArgs);
+                }
             }
 
             private void ReleaseBuffers()
@@ -368,6 +466,11 @@ namespace Tuntenfisch.Voxels.DC
                         m_generatedTrianglesBuffer.EndReadback();
                     }
                     m_generatedTriangles.Dispose();
+                }
+
+                if (m_triangleCounts.IsCreated)
+                {
+                    m_triangleCounts.Dispose();
                 }
 
                 // Release GPU buffers.
@@ -393,6 +496,32 @@ namespace Tuntenfisch.Voxels.DC
                 {
                     m_generatedTrianglesBuffer.Release();
                     m_generatedTrianglesBuffer = null;
+                }
+
+                if (m_flatShadedVerticesBuffer != null)
+                {
+                    if (m_flatShadedVerticesBuffer.ReadbackInProgress)
+                    {
+                        m_flatShadedVerticesBuffer.EndReadback();
+                    }
+                    m_flatShadedVerticesBuffer.Release();
+                    m_flatShadedVerticesBuffer = null;
+                }
+
+                if (m_flatShadedTrianglesBuffer != null)
+                {
+                    if (m_flatShadedTrianglesBuffer.ReadbackInProgress)
+                    {
+                        m_flatShadedTrianglesBuffer.EndReadback();
+                    }
+                    m_flatShadedTrianglesBuffer.Release();
+                    m_flatShadedTrianglesBuffer = null;
+                }
+
+                if (m_flatShadingDispatchArgsBuffer != null)
+                {
+                    m_flatShadingDispatchArgsBuffer.Release();
+                    m_flatShadingDispatchArgsBuffer = null;
                 }
             }
 
