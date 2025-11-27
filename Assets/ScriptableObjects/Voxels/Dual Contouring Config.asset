@@ -16,3 +16,4 @@ MonoBehaviour:
   m_schmitzParticleIterations: 15
   m_schmitzParticleStepSize: 0.2
   m_sharpFeatureAngle: 85
+  m_enableSmoothShading: 1
