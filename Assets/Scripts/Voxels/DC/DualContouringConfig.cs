@@ -14,6 +14,7 @@ namespace Tuntenfisch.Voxels.DC
         public int SchmitzParticleIterations => m_schmitzParticleIterations;
         public float SchmitzParticleStepSize => m_schmitzParticleStepSize;
         public float SharpFeatureAngle => m_sharpFeatureAngle;
+        public bool EnableSmoothShading => m_enableSmoothShading;
 
         [SerializeField]
         private ComputeShader m_compute;
@@ -26,6 +27,8 @@ namespace Tuntenfisch.Voxels.DC
         [Range(0.0f, 180.0f)]
         [SerializeField]
         private float m_sharpFeatureAngle = 30.0f;
+        [SerializeField]
+        private bool m_enableSmoothShading;
 
         private void OnValidate()
         {
